@@ -20,7 +20,6 @@ const MOD_ROLE_ID = process.env.MOD_ROLE_ID;
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
 
 const PINK = 0xff4fa3;
-const PREFIX = ',';
 const DATA_PATH = path.join(__dirname, 'data.json');
 
 function loadData() {
@@ -41,7 +40,7 @@ function saveData(d) {
 let data = loadData();
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
 });
 
 function buildPanelEmbed() {
@@ -52,7 +51,7 @@ function buildPanelEmbed() {
       "Need a hand? Hit the button below.\n\n" +
         'A private channel gets spun up just for you and the staff team.\nTell us what\'s up and someone will be with you shortly.'
     )
-    .setFooter({ text: 'Wavey • Ticket System' })
+    .setFooter({ text: 'Wavey • Support System' })
     .setTimestamp();
 }
 
@@ -98,14 +97,26 @@ function buildHelpEmbed() {
       { name: '🔨 Moderation', value: 'Warnings, kicks, bans & logs.', inline: true },
       { name: '🎫 Ticket System', value: 'Support tickets & staff tools.', inline: true }
     )
-    .setFooter({ text: 'Wavey • Use ,help anytime' })
+    .setFooter({ text: 'Wavey • /help anytime' })
     .setTimestamp();
 }
 
 client.once(Events.ClientReady, async () => {
   console.log(`Wavey is online as ${client.user.tag}`);
+  await registerCommands();
   await ensureTicketPanel();
 });
+
+async function registerCommands() {
+  try {
+    await client.application.commands.set([
+      { name: 'help', description: 'Show everything Wavey can do' },
+    ]);
+    console.log('Slash commands registered.');
+  } catch (err) {
+    console.error('Failed to register slash commands:', err);
+  }
+}
 
 async function ensureTicketPanel() {
   if (!TICKET_CHANNEL_ID) {
@@ -144,17 +155,14 @@ client.on(Events.GuildMemberAdd, async (member) => {
   }
 });
 
-client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot || !message.guild) return;
-  if (!message.content.startsWith(PREFIX)) return;
-
-  const command = message.content.slice(PREFIX.length).trim().toLowerCase();
-  if (command === 'help') {
-    await message.channel.send({ embeds: [buildHelpEmbed()] });
-  }
-});
-
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === 'help') {
+      return interaction.reply({ embeds: [buildHelpEmbed()] });
+    }
+    return;
+  }
+
   if (!interaction.isButton()) return;
 
   if (interaction.customId === 'wavey_open_ticket') return handleOpenTicket(interaction);
