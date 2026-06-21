@@ -50,9 +50,9 @@ function buildPanelEmbed() {
     .setTitle('🌊 Wavey Support Desk')
     .setDescription(
       "Need a hand? Hit the button below.\n\n" +
-        'A private channel gets spun up just for you and the staff team — no waiting around in a crowded chat. Tell us what\'s up and someone will be with you shortly.'
+        'A private channel gets spun up just for you and the staff team. Tell us what\'s up and someone will be with you shortly.'
     )
-    .setFooter({ text: 'Wavey • Support System' })
+    .setFooter({ text: 'Wavey • Ticket System' })
     .setTimestamp();
 }
 
