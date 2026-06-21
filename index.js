@@ -110,7 +110,7 @@ client.once(Events.ClientReady, async () => {
 async function registerCommands() {
   try {
     await client.application.commands.set([
-      { name: 'help', description: 'Show everything Wavey can do' },
+      { name: 'help', description: 'shows help menu of bot commands' },
     ]);
     console.log('Slash commands registered.');
   } catch (err) {
