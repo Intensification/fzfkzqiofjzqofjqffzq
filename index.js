@@ -35,7 +35,7 @@ const snipes = new Map();
 const userMessageLog = new Map(); 
 const warningsDatabase = new Map();
 const processingSpamUsers = new Set(); 
-const activeCustomVCs = new Map(); // Maps temporary voice channel ID -> { ownerId, textChannelId, voiceChannelId }
+const activeCustomVCs = new Map(); // Maps temporary voice channel ID -> { ownerId, voiceChannelId }
 
 function loadData() {
   if (!fs.existsSync(DATA_PATH)) {
@@ -270,7 +270,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   if (newState.channelId && newState.channelId === data.j2cChannelId) {
     const guild = newState.guild;
     const categoryId = newState.channel.parentId;
-
     const voiceChannelName = `${user.username}-vc`;
 
     try {
@@ -291,30 +290,12 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         ]
       });
 
-      // 2. Spin up custom text channel for controls
-      const customText = await guild.channels.create({
-        name: `${user.username}-vc-chat`,
-        type: ChannelType.GuildText,
-        parent: categoryId || undefined,
-        permissionOverwrites: [
-          {
-            id: guild.roles.everyone.id,
-            deny: [PermissionsBitField.Flags.ViewChannel],
-          },
-          {
-            id: user.id,
-            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
-          }
-        ]
-      });
-
-      // Move user to their brand new voice channel
+      // Move user to their brand new voice channel instantly
       await newState.member.voice.setChannel(customVC).catch(() => {});
 
-      // Cache custom voice mapping settings
+      // Cache custom voice mapping settings mapped to the voice channel ID
       activeCustomVCs.set(customVC.id, {
         ownerId: user.id,
-        textChannelId: customText.id,
         voiceChannelId: customVC.id
       });
 
@@ -322,7 +303,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       const vcControlEmbed = new EmbedBuilder()
         .setColor(PINK)
         .setTitle('🔊 Voice Channel Controls')
-        .setDescription(`Hey <@${user.id}>! Welcome to your private room. Use the control deck below to manage your settings instantly.`);
+        .setDescription(`Hey <@${user.id}>! Welcome to your private room. Use the control deck below to manage your settings instantly directly from this voice chat.`);
 
       const btnRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('vc_lock').setLabel('Lock room').setStyle(ButtonStyle.Danger).setEmoji('🔒'),
@@ -332,8 +313,9 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         new ButtonBuilder().setCustomId('vc_delete').setLabel('Delete Room').setStyle(ButtonStyle.Danger).setEmoji('🗑️')
       );
 
-      await customText.send({ content: `<@${user.id}>`, embeds: [vcControlEmbed], components: [btnRow] });
-      await logToChannel('Voice Room Initialized', `Created temporary chat/voice instances for user: ${user.tag}`);
+      // Send the ping and control panel straight into the Voice Channel text chat area!
+      await customVC.send({ content: `<@${user.id}>`, embeds: [vcControlEmbed], components: [btnRow] });
+      await logToChannel('Voice Room Initialized', `Created temporary voice interface for user: ${user.tag}`);
 
     } catch (err) {
       console.error('Failed to create custom voice session assets:', err);
@@ -346,14 +328,10 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     if (cachedRoom) {
       const channelObj = oldState.guild.channels.cache.get(oldState.channelId);
       if (channelObj && channelObj.members.size === 0) {
-        // Nobody left inside, nuke channels entirely
+        // Nobody left inside, nuke the voice channel entirely
         activeCustomVCs.delete(oldState.channelId);
-        
-        const txtChan = oldState.guild.channels.cache.get(cachedRoom.textChannelId);
-        if (txtChan) await txtChan.delete().catch(() => {});
         await channelObj.delete().catch(() => {});
-
-        await logToChannel('Voice Room Automated Cleanup', `Wiped out empty custom chat and voice maps owned by user ID: \`${cachedRoom.ownerId}\``);
+        await logToChannel('Voice Room Automated Cleanup', `Wiped out empty custom voice channel owned by user ID: \`${cachedRoom.ownerId}\``);
       }
     }
   }
@@ -716,9 +694,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Dynamic Custom Voice Channels Control Panel Interactions Engine
   if (interaction.isButton() && interaction.customId.startsWith('vc_')) {
-    // Find the voice room configuration using the current channel matching maps
-    const activeRooms = Array.from(activeCustomVCs.values());
-    const matchedRoom = activeRooms.find(r => r.textChannelId === interaction.channelId);
+    // The button was pressed inside the actual voice channel's chat interface
+    const matchedRoom = activeCustomVCs.get(interaction.channelId);
 
     if (!matchedRoom) return interaction.reply({ content: '❌ This management deck does not point to an active session map.', ephemeral: true });
     
@@ -766,15 +743,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       case 'vc_delete':
         activeCustomVCs.delete(matchedRoom.voiceChannelId);
         await vcChannelObj.delete().catch(() => {});
-        await interaction.channel.delete().catch(() => {});
         return;
     }
   }
 
   // Modals targeting VC controls setup actions
   if (interaction.isModalSubmit() && interaction.customId.startsWith('vc_modal_')) {
-    const activeRooms = Array.from(activeCustomVCs.values());
-    const matchedRoom = activeRooms.find(r => r.textChannelId === interaction.channelId);
+    const matchedRoom = activeCustomVCs.get(interaction.channelId);
     if (!matchedRoom) return interaction.reply({ content: '❌ Room mapping reference not found.', ephemeral: true });
 
     const vcChannelObj = interaction.guild.channels.cache.get(matchedRoom.voiceChannelId);
