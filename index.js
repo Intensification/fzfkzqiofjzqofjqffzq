@@ -111,6 +111,7 @@ async function registerCommands() {
   try {
     await client.application.commands.set([
       { name: 'help', description: 'shows help menu of bot commands' },
+      { name: 'invite', description: 'Sends you an invite link via DM' },
     ]);
     console.log('Slash commands registered.');
   } catch (err) {
@@ -159,6 +160,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === 'help') {
       return interaction.reply({ embeds: [buildHelpEmbed()] });
+    }
+    
+    if (interaction.commandName === 'invite') {
+      const inviteEmbed = new EmbedBuilder()
+        .setColor(PINK)
+        .setTitle('📬 Official Server Invitation')
+        .setDescription(`Hey **${interaction.user.username}**! Here is your requested invitation link:\n\n🔗 https://discord.gg/2w2nXca5bX`)
+        .setFooter({ text: 'Wavey • Spread the word!' })
+        .setTimestamp();
+
+      try {
+        await interaction.user.send({ embeds: [inviteEmbed] });
+        return interaction.reply({ content: '📬 Check your DMs! I just slid the invite link right in.', ephemeral: false });
+      } catch (err) {
+        return interaction.reply({ content: '❌ I tried to DM you, but your DMs are locked! Please open them up and try again.', ephemeral: true });
+      }
     }
     return;
   }
