@@ -35,7 +35,7 @@ const snipes = new Map();
 const userMessageLog = new Map(); 
 const warningsDatabase = new Map();
 const processingSpamUsers = new Set(); 
-const activeCustomVCs = new Map(); // Maps temporary voice channel ID -> { ownerId, voiceChannelId }
+const activeCustomVCs = new Map();
 
 function loadData() {
   if (!fs.existsSync(DATA_PATH)) {
@@ -63,6 +63,21 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
   ],
 });
+
+// Helper function to build the Security Control Center panel embed dynamically
+function buildAntiRaidEmbed() {
+  return new EmbedBuilder()
+    .setColor(PINK)
+    .setTitle('🛡️ Security Control Center')
+    .setDescription(`Manage server-level antiraid toggles below:\n\n• **Anti-Spam Limit:** ${data.antiSpamLimit ? `🟢 \`${data.antiSpamLimit}\` messages inside 5s` : '🔴 Disabled'}\n• **Anti-Link Filter:** ${data.antiLinkActive ? '🟢 Active' : '🔴 Disabled'}`);
+}
+
+function buildAntiRaidButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('raid_toggle_spam').setLabel('Setup Anti-Spam').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
+    new ButtonBuilder().setCustomId('raid_toggle_link').setLabel('Toggle Anti-Link').setStyle(data.antiLinkActive ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🔗')
+  );
+}
 
 // Helper function to send simple matching pink embeds in chat
 function sendEmbed(message, title, description, error = false) {
@@ -261,19 +276,16 @@ client.on(Events.MessageDelete, async (message) => {
   });
 });
 
-// Join to Create Voice Channel Handler Engine
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const user = newState.member?.user;
   if (!user || user.bot) return;
 
-  // Check if they joined the official Join-To-Create setup channel
   if (newState.channelId && newState.channelId === data.j2cChannelId) {
     const guild = newState.guild;
     const categoryId = newState.channel.parentId;
     const voiceChannelName = `${user.username}-vc`;
 
     try {
-      // 1. Spin up custom voice channel
       const customVC = await guild.channels.create({
         name: voiceChannelName,
         type: ChannelType.GuildVoice,
@@ -290,16 +302,13 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         ]
       });
 
-      // Move user to their brand new voice channel instantly
       await newState.member.voice.setChannel(customVC).catch(() => {});
 
-      // Cache custom voice mapping settings mapped to the voice channel ID
       activeCustomVCs.set(customVC.id, {
         ownerId: user.id,
         voiceChannelId: customVC.id
       });
 
-      // Build control embed layout panel
       const vcControlEmbed = new EmbedBuilder()
         .setColor(PINK)
         .setTitle('🔊 Voice Channel Controls')
@@ -313,7 +322,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         new ButtonBuilder().setCustomId('vc_delete').setLabel('Delete Room').setStyle(ButtonStyle.Danger).setEmoji('🗑️')
       );
 
-      // Send the ping and control panel straight into the Voice Channel text chat area!
       await customVC.send({ content: `<@${user.id}>`, embeds: [vcControlEmbed], components: [btnRow] });
       await logToChannel('Voice Room Initialized', `Created temporary voice interface for user: ${user.tag}`);
 
@@ -322,13 +330,11 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     }
   }
 
-  // Handle empty cleanup sequences when users leave custom generated rooms
   if (oldState.channelId && oldState.channelId !== newState.channelId) {
     const cachedRoom = activeCustomVCs.get(oldState.channelId);
     if (cachedRoom) {
       const channelObj = oldState.guild.channels.cache.get(oldState.channelId);
       if (channelObj && channelObj.members.size === 0) {
-        // Nobody left inside, nuke the voice channel entirely
         activeCustomVCs.delete(oldState.channelId);
         await channelObj.delete().catch(() => {});
         await logToChannel('Voice Room Automated Cleanup', `Wiped out empty custom voice channel owned by user ID: \`${cachedRoom.ownerId}\``);
@@ -340,7 +346,6 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
 client.on(Events.MessageCreate, async (message) => {
   if (!message.guild || message.author.bot) return;
 
-  // Anti-Link Active Enforcement Check
   if (data.antiLinkActive) {
     const contentCheck = message.content.toLowerCase();
     if (contentCheck.includes('discord.gg/') || (contentCheck.includes('http') && !contentCheck.includes('tenor.com') && !contentCheck.includes('media.discordapp.net'))) {
@@ -356,7 +361,6 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
-  // Anti-Spam Check with Lock & Mute-First Execution
   if (data.antiSpamLimit && data.antiSpamLimit > 0) {
     if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
       const now = Date.now();
@@ -424,18 +428,7 @@ client.on(Events.MessageCreate, async (message) => {
 
   if (command === 'antiraid') {
     if (message.author.id !== OWNER_ID) return sendEmbed(message, null, '❌ Error: You do not have permission to use this command.', true);
-    
-    const raidEmbed = new EmbedBuilder()
-      .setColor(PINK)
-      .setTitle('🛡️ Security Control Center')
-      .setDescription(`Manage server-level antiraid toggles below:\n\n• **Anti-Spam Limit:** ${data.antiSpamLimit ? `\`${data.antiSpamLimit}\` messages inside 5s` : '🔴 Disabled'}\n• **Anti-Link Filter:** ${data.antiLinkActive ? '🟢 Active' : '🔴 Disabled'}`);
-
-    const controlRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('raid_toggle_spam').setLabel('Setup Anti-Spam').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
-      new ButtonBuilder().setCustomId('raid_toggle_link').setLabel('Toggle Anti-Link').setStyle(data.antiLinkActive ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🔗')
-    );
-
-    return message.channel.send({ embeds: [raidEmbed], components: [controlRow] });
+    return message.channel.send({ embeds: [buildAntiRaidEmbed()], components: [buildAntiRaidButtons()] });
   }
 
   const isStaff = message.member.permissions.has(PermissionsBitField.Flags.ManageMessages);
@@ -444,7 +437,7 @@ client.on(Events.MessageCreate, async (message) => {
     case 'j2c':
       if (!isStaff) return sendEmbed(message, null, '❌ Missing Permissions.', true);
       const targetVcId = args[0];
-      if (!targetVcId) return sendEmbed(message, null, '❌ Please provide a valid Voice Channel ID. Example: `?j2c 123456789012345`', true);
+      if (!targetVcId) return sendEmbed(message, null, '❌ Please provide a valid Voice Channel ID.', true);
       
       data.j2cChannelId = targetVcId;
       saveData(data);
@@ -648,7 +641,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // Handle anti-raid setup interactive screens
   if (interaction.isButton() && interaction.customId.startsWith('raid_')) {
     if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Access Denied: Owner profile check failed.', ephemeral: true });
 
@@ -667,20 +659,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.customId === 'raid_toggle_link') {
       data.antiLinkActive = !data.antiLinkActive;
       saveData(data);
-      const updateEmbed = new EmbedBuilder()
-        .setColor(PINK)
-        .setTitle('🛡️ Security Control Center')
-        .setDescription(`Manage server-level antiraid toggles below:\n\n• **Anti-Spam Limit:** ${data.antiSpamLimit ? `\`${data.antiSpamLimit}\` messages inside 5s` : '🔴 Disabled'}\n• **Anti-Link Filter:** ${data.antiLinkActive ? '🟢 Active' : '🔴 Disabled'}`);
-      const controlRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('raid_toggle_spam').setLabel('Setup Anti-Spam').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
-        new ButtonBuilder().setCustomId('raid_toggle_link').setLabel('Toggle Anti-Link').setStyle(data.antiLinkActive ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🔗')
-      );
       
       await logToChannel('Security Config Altered', `Anti-Link module toggled to: **${data.antiLinkActive ? 'Online' : 'Offline'}** by owner.`);
-      return interaction.update({ embeds: [updateEmbed], components: [controlRow] });
+      return interaction.update({ embeds: [buildAntiRaidEmbed()], components: [buildAntiRaidButtons()] });
     }
   }
 
+  // FIxed Modal Submit handler to dynamically update the control panel embed status
   if (interaction.isModalSubmit() && interaction.customId === 'spam_modal_config') {
     const rawVal = interaction.fields.getTextInputValue('spam_count_input');
     const parsed = parseInt(rawVal);
@@ -689,17 +674,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     data.antiSpamLimit = parsed;
     saveData(data);
     await logToChannel('Security Config Altered', `Anti-Spam threshold set to: **\`${parsed}\` messages/5s** by owner.`);
-    return interaction.reply({ content: `✅ **Anti-Spam Gate Set:** Users sending \`${parsed}\` or more messages within 5 seconds will be muted for 5 minutes and have their spam cleared.` });
+    
+    // Updates the dashboard view instantly to show the green dot and limit parameter!
+    return interaction.update({ embeds: [buildAntiRaidEmbed()], components: [buildAntiRaidButtons()] });
   }
 
-  // Dynamic Custom Voice Channels Control Panel Interactions Engine
   if (interaction.isButton() && interaction.customId.startsWith('vc_')) {
-    // The button was pressed inside the actual voice channel's chat interface
     const matchedRoom = activeCustomVCs.get(interaction.channelId);
-
     if (!matchedRoom) return interaction.reply({ content: '❌ This management deck does not point to an active session map.', ephemeral: true });
     
-    // Auth validation: only room creator can change permission status nodes
     if (interaction.user.id !== matchedRoom.ownerId) {
       return interaction.reply({ content: '❌ Only the creator of this voice session can use these layout controls.', ephemeral: true });
     }
@@ -747,7 +730,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
-  // Modals targeting VC controls setup actions
   if (interaction.isModalSubmit() && interaction.customId.startsWith('vc_modal_')) {
     const matchedRoom = activeCustomVCs.get(interaction.channelId);
     if (!matchedRoom) return interaction.reply({ content: '❌ Room mapping reference not found.', ephemeral: true });
