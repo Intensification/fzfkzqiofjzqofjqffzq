@@ -23,6 +23,7 @@ const TICKET_CHANNEL_ID = process.env.TICKET_CHANNEL_ID;
 const AUTOROLE_ID = process.env.AUTOROLE_ID;
 const MOD_ROLE_ID = process.env.MOD_ROLE_ID;
 const TICKET_CATEGORY_ID = process.env.TICKET_CATEGORY_ID || null;
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID; // Loaded from your environment parameters
 
 const PINK = 0xff4fa3;
 const PREFIX = '?';
@@ -31,7 +32,7 @@ const DATA_PATH = path.join(__dirname, 'data.json');
 
 // Local storage matrices
 const snipes = new Map();
-const userMessageLog = new Map();
+const userMessageLog = new Map(); // Holds message timestamps and references for spam evaluation
 const warningsDatabase = new Map();
 
 function loadData() {
@@ -59,6 +60,27 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
+
+// Centralized System Logging Helper Engine
+async function logToChannel(title, description, color = PINK, fields = []) {
+  if (!LOG_CHANNEL_ID) return;
+  try {
+    const logChannel = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
+    if (!logChannel || !logChannel.isTextBased()) return;
+
+    const logEmbed = new EmbedBuilder()
+      .setColor(color)
+      .setTitle(`📋 Log: ${title}`)
+      .setDescription(description)
+      .setTimestamp();
+
+    if (fields.length > 0) logEmbed.addFields(fields);
+
+    await logChannel.send({ embeds: [logEmbed] });
+  } catch (err) {
+    console.error('Failed to dispatch logging embed entry:', err);
+  }
+}
 
 function buildPanelEmbed() {
   return new EmbedBuilder()
@@ -99,7 +121,6 @@ function buildConfirmCloseRow() {
   );
 }
 
-// Built-in categoric routing for the /help slash option commands list
 function buildHelpEmbed(category = null) {
   const embed = new EmbedBuilder()
     .setColor(PINK)
@@ -158,7 +179,6 @@ client.once(Events.ClientReady, async () => {
   await ensureTicketPanel();
 });
 
-// Registers /help with choices/autocompletion selections and /invite globally
 async function registerCommands() {
   try {
     await client.application.commands.set([
@@ -192,23 +212,13 @@ async function registerCommands() {
 }
 
 async function ensureTicketPanel() {
-  if (!TICKET_CHANNEL_ID) {
-    console.warn('TICKET_CHANNEL_ID not set, skipping panel send.');
-    return;
-  }
-
+  if (!TICKET_CHANNEL_ID) return;
   const channel = await client.channels.fetch(TICKET_CHANNEL_ID).catch(() => null);
-  if (!channel) {
-    console.warn('Could not fetch TICKET_CHANNEL_ID, check the id.');
-    return;
-  }
+  if (!channel) return;
 
   if (data.panelSent && data.panelChannelId === TICKET_CHANNEL_ID && data.panelMessageId) {
     const existing = await channel.messages.fetch(data.panelMessageId).catch(() => null);
-    if (existing) {
-      console.log('Ticket panel already exists, skipping resend.');
-      return;
-    }
+    if (existing) return;
   }
 
   const msg = await channel.send({ embeds: [buildPanelEmbed()], components: [buildPanelRow()] });
@@ -216,19 +226,16 @@ async function ensureTicketPanel() {
   data.panelMessageId = msg.id;
   data.panelChannelId = TICKET_CHANNEL_ID;
   saveData(data);
-  console.log('Ticket panel sent.');
 }
 
 client.on(Events.GuildMemberAdd, async (member) => {
   if (!AUTOROLE_ID) return;
   try {
     await member.roles.add(AUTOROLE_ID);
-  } catch (err) {
-    console.error(`Couldn't autorole ${member.user.tag}:`, err.message);
-  }
+    await logToChannel('Auto-Role Appended', `Assigned designated role to newly joined member: ${member.user.tag} (\`${member.id}\`)`);
+  } catch (err) {}
 });
 
-// Deleted message listener engine supporting ?s command functionality
 client.on(Events.MessageDelete, async (message) => {
   if (!message.guild || message.author?.bot) return;
   let deleter = 'Unknown Deletion';
@@ -250,7 +257,6 @@ client.on(Events.MessageDelete, async (message) => {
   });
 });
 
-// Guardrail Filter: Security validation interceptor for Prefix processing
 client.on(Events.MessageCreate, async (message) => {
   if (!message.guild || message.author.bot) return;
 
@@ -260,38 +266,60 @@ client.on(Events.MessageCreate, async (message) => {
     if (contentCheck.includes('discord.gg/') || (contentCheck.includes('http') && !contentCheck.includes('tenor.com') && !contentCheck.includes('media.discordapp.net'))) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
         await message.delete().catch(() => {});
-        return message.channel.send(`❌ <@${message.author.id}>, posting structural external invite links or unauthorized websites is restricted.`);
+        await logToChannel('Anti-Link Triggered', `Deleted link from <@${message.author.id}> in <#${message.channel.id}>`, 0xffa500, [
+          { name: 'User', value: `${message.author.tag} (\`${message.author.id}\`)`, inline: true },
+          { name: 'Content Sent', value: `\`\`\`${message.content}\`\`\`` }
+        ]);
+        return message.channel.send(`❌ <@${message.author.id}>, posting external invite links or unauthorized websites is restricted.`);
       }
     }
   }
 
-  // Anti-Spam Active Enforcement Check
+  // Anti-Spam Active Enforcement Check with Auto-Message Deletion & Logging
   if (data.antiSpamLimit && data.antiSpamLimit > 0) {
     if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
       const now = Date.now();
       if (!userMessageLog.has(message.author.id)) userMessageLog.set(message.author.id, []);
       const logs = userMessageLog.get(message.author.id);
-      logs.push(now);
+      
+      // Store timestamp alongside the message instance to allow tactical deletion later
+      logs.push({ time: now, msg: message });
 
-      const withinWindow = logs.filter(t => now - t < 5000);
+      // Keep only logs inside the 5-second evaluation frame
+      const withinWindow = logs.filter(item => now - item.time < 5000);
       userMessageLog.set(message.author.id, withinWindow);
 
       if (withinWindow.length >= data.antiSpamLimit) {
+        // Clear trackers early to prevent recursive hits
         userMessageLog.set(message.author.id, []);
+        
         try {
+          // Tactical execution: Delete every cached message the user just sent in this spam wave
+          for (const item of withinWindow) {
+            await item.msg.delete().catch(() => {});
+          }
+
+          // Quarantine mitigation: Apply a 5-minute timeout
           await message.member.timeout(5 * 60 * 1000, 'Triggered Anti-Spam Mitigation Limits');
-          return message.channel.send(`🚨 <@${message.author.id}> has been dynamically timed out for 5 minutes for exceeding the active message threshold.`);
-        } catch {}
+          
+          await logToChannel('Anti-Spam Action Taken', `Timed out <@${message.author.id}> for 5 minutes and flushed their spammed messages.`, 0xff0000, [
+            { name: 'Target User', value: `${message.author.tag} (\`${message.author.id}\`)`, inline: true },
+            { name: 'Channel Affected', value: `<#${message.channel.id}>`, inline: true },
+            { name: 'Threshold Triggered', value: `${data.antiSpamLimit} messages / 5s`, inline: true }
+          ]);
+
+          return message.channel.send(`🚨 <@${message.author.id}> has been timed out for 5 minutes and their spam messages were cleared.`);
+        } catch (err) {
+          console.error('Failed to execute complete anti-spam cleanup routines:', err);
+        }
       }
     }
   }
 
-  // Prefix Filter Gate
   if (!message.content.startsWith(PREFIX)) return;
   const args = message.content.slice(PREFIX.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // Core Prefix Commands Block
   if (command === 's') {
     const sniped = snipes.get(message.channel.id);
     if (!sniped) return message.channel.send('There is nothing to snipe in this channel!');
@@ -324,23 +352,26 @@ client.on(Events.MessageCreate, async (message) => {
     return message.channel.send({ embeds: [raidEmbed], components: [controlRow] });
   }
 
-  // Functional Commands Registry Map
   const isStaff = message.member.permissions.has(PermissionsBitField.Flags.ManageMessages);
 
   switch (command) {
-    // --- Moderation Section Actions ---
     case 'kick':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const kUser = message.mentions.members.first(); if (!kUser) return message.reply('Define entity profile.');
-      await kUser.kick().catch(() => {}); return message.channel.send('✅ Expelled designated identity successfully.');
+      await kUser.kick().catch(() => {}); 
+      await logToChannel('Member Kicked', `Staff member <@${message.author.id}> expelled a user.`, 0xffa500, [{ name: 'Target Profile', value: `${kUser.user.tag} (\`${kUser.id}\`)` }]);
+      return message.channel.send('✅ Expelled designated identity successfully.');
     case 'ban':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const bUser = message.mentions.members.first(); if (!bUser) return message.reply('Define entity profile.');
-      await bUser.ban().catch(() => {}); return message.channel.send('⛔ Profile dropped and added into server structural blacklist registries.');
+      await bUser.ban().catch(() => {}); 
+      await logToChannel('Member Banned', `Staff member <@${message.author.id}> banned a user.`, 0xff0000, [{ name: 'Target Profile', value: `${bUser.user.tag} (\`${bUser.id}\`)` }]);
+      return message.channel.send('⛔ Profile dropped and added into server structural blacklist registries.');
     case 'warn':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const wUser = message.mentions.users.first(); if (!wUser) return message.reply('Target not found.');
       const count = (warningsDatabase.get(wUser.id) || 0) + 1; warningsDatabase.set(wUser.id, count);
+      await logToChannel('Infraction Indexed (Warn)', `Staff member <@${message.author.id}> issued a warning.`, 0xffff00, [{ name: 'Target', value: `${wUser.tag} (\`${wUser.id}\`)`, inline: true }, { name: 'Total Violations Tally', value: `${count}`, inline: true }]);
       return message.channel.send(`⚠️ Registered infraction entry for **${wUser.username}**. Database shows tally count: **${count}**`);
     case 'warnings':
       const inspectUser = message.mentions.users.first() || message.author;
@@ -348,17 +379,23 @@ client.on(Events.MessageCreate, async (message) => {
     case 'clearwarns':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const cwUser = message.mentions.users.first(); if (!cwUser) return message.reply('Target not specified.');
-      warningsDatabase.set(cwUser.id, 0); return message.channel.send('🧹 Purged structural logging warning data across selected configuration blocks.');
+      warningsDatabase.set(cwUser.id, 0);
+      await logToChannel('Warnings Purged', `Staff member <@${message.author.id}> wiped infraction marks for ${cwUser.tag}.`);
+      return message.channel.send('🧹 Purged structural logging warning data across selected configuration blocks.');
     case 'timeout':
     case 'mute':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const tUser = message.mentions.members.first(); if (!tUser) return message.reply('Target not specified.');
-      await tUser.timeout(10 * 60 * 1000).catch(() => {}); return message.channel.send('⏳ Confined user into internal quarantine arrays for 10 minutes.');
+      await tUser.timeout(10 * 60 * 1000).catch(() => {}); 
+      await logToChannel('Manual Timeout Applied', `<@${message.author.id}> isolated a user for 10 minutes.`, 0xffa500, [{ name: 'Target', value: `${tUser.user.tag} (\`${tUser.id}\`)` }]);
+      return message.channel.send('⏳ Confined user into internal quarantine arrays for 10 minutes.');
     case 'untimeout':
     case 'unmute':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const utUser = message.mentions.members.first(); if (!utUser) return message.reply('Target not specified.');
-      await utUser.timeout(null).catch(() => {}); return message.channel.send('⏳ Quarantine restriction access walls cleared.');
+      await utUser.timeout(null).catch(() => {}); 
+      await logToChannel('Timeout Revoked', `<@${message.author.id}> deactivated the isolation field for ${utUser.user.tag}.`);
+      return message.channel.send('⏳ Quarantine restriction access walls cleared.');
     case 'purge':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const amount = parseInt(args[0]) || 10; await message.channel.bulkDelete(Math.min(amount, 100)).catch(() => {});
@@ -366,7 +403,9 @@ client.on(Events.MessageCreate, async (message) => {
     case 'unban':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       if (!args[0]) return message.reply('Provide user ID.');
-      await message.guild.members.unban(args[0]).catch(() => {}); return message.channel.send('🔓 Drop authorization processed for targeted structural entry key.');
+      await message.guild.members.unban(args[0]).catch(() => {}); 
+      await logToChannel('Ban Revoked', `Staff profile <@${message.author.id}> removed ban block on user ID: \`${args[0]}\``);
+      return message.channel.send('🔓 Drop authorization processed for targeted structural entry key.');
     case 'softban':
       if (!isStaff) return message.reply('Insufficient system execution clearance.');
       const sbUser = message.mentions.members.first(); if (!sbUser) return message.reply('Target profile undefined.');
@@ -381,7 +420,6 @@ client.on(Events.MessageCreate, async (message) => {
     case 'reason':
       return message.channel.send('📝 Appended custom contextual notes parameter elements into systemic action configurations.');
 
-    // --- Server Management Actions ---
     case 'addrole':
       if (!isStaff) return message.reply('Clearance mapping issue.');
       const arMember = message.mentions.members.first(); const arRole = message.mentions.roles.first();
@@ -415,7 +453,6 @@ client.on(Events.MessageCreate, async (message) => {
     case 'backup':
       return message.channel.send('💾 Complete architectural structure map variables mirrored into internal data backup files.');
 
-    // --- Statistics Actions ---
     case 'serverinfo':
       return message.channel.send({ embeds: [new EmbedBuilder().setColor(PINK).setTitle(message.guild.name).addFields({ name: 'Total Server Nodes', value: `${message.guild.memberCount}`, inline: true }, { name: 'Owner Profile Tag', value: `<@${message.guild.ownerId}>`, inline: true })] });
     case 'userinfo':
@@ -433,7 +470,6 @@ client.on(Events.MessageCreate, async (message) => {
     case 'membercount':
       return message.channel.send(`👥 Global registry verification trace yields exactly: **${message.guild.memberCount}** entities present.`);
 
-    // --- Automation Actions ---
     case 'autoresponse':
       return message.channel.send('⚙️ Keyword algorithmic sequence mappings uploaded to server memory storage buffers.');
     case 'embedcreate':
@@ -450,7 +486,6 @@ client.on(Events.MessageCreate, async (message) => {
     case 'weather':
       return message.channel.send('🌤️ Accessing weather server maps... System reporting clear atmospheric layout conditions.');
 
-    // --- Ticket Controls via Prefix ---
     case 'ticket':
       return handleOpenTicket({ guild: message.guild, user: message.author, deferReply: async () => {}, editReply: async (o) => message.channel.send(o.content), reply: async (o) => message.channel.send(o.content) });
     case 'close':
@@ -467,7 +502,6 @@ client.on(Events.MessageCreate, async (message) => {
     case 'transcript':
       return message.channel.send('📜 Communications history thread logged. Secure output download records processed successfully.');
 
-    // --- Music Action Stubs ---
     case 'play': return message.channel.send('🎵 Allocation engine linked up with streaming gateway routes successfully.');
     case 'pause': return message.channel.send('⏸️ Suspended media audio frame processing loop variables.');
     case 'skip': return message.channel.send('⏭️ Index position shift completed: advanced tracking position index grid by \`+1\`.');
@@ -479,7 +513,6 @@ client.on(Events.MessageCreate, async (message) => {
     case 'shuffle': return message.channel.send('🔀 Scrambled target array configurations matching dynamic track items.');
     case 'clearqueue': return message.channel.send('🧹 Purged background indexing tracks database queues.');
 
-    // --- Giveaway Action Stubs ---
     case 'gstart': return message.channel.send('🎉 Created giveaway validation tracks across localized guild node channels.');
     case 'gend': return message.channel.send('🎉 Processing completion computations over tracking entry candidate profiles.');
     case 'greroll': return message.channel.send('🎲 Rerolled lucky entry profiles via localized database array lookups.');
@@ -492,9 +525,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// Handles Interaction Routing for Tickets, Help, Invite, and Anti-Raid Core
 client.on(Events.InteractionCreate, async (interaction) => {
-  // Advanced /help Sub-category Router Logic
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === 'help') {
       const selectedCategory = interaction.options.getString('category');
@@ -519,7 +550,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // Anti-Raid Panel Button Event Processing
   if (interaction.isButton() && interaction.customId.startsWith('raid_')) {
     if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: '❌ Security violation profile.', ephemeral: true });
 
@@ -546,11 +576,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setCustomId('raid_toggle_spam').setLabel('Setup Anti-Spam').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
         new ButtonBuilder().setCustomId('raid_toggle_link').setLabel('Toggle Anti-Link').setStyle(data.antiLinkActive ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🔗')
       );
+      
+      await logToChannel('Security Setting Altered', `Anti-Link module toggled status to: **${data.antiLinkActive ? 'Online' : 'Offline'}** by owner.`);
       return interaction.update({ embeds: [updateEmbed], components: [controlRow] });
     }
   }
 
-  // Anti-Raid Modal Inputs Ingestion Processing
   if (interaction.isModalSubmit() && interaction.customId === 'spam_modal_config') {
     const rawVal = interaction.fields.getTextInputValue('spam_count_input');
     const parsed = parseInt(rawVal);
@@ -558,10 +589,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     
     data.antiSpamLimit = parsed;
     saveData(data);
+    await logToChannel('Security Setting Altered', `Anti-Spam threshold limit configuration set to: **\`${parsed}\` messages/5s** by owner.`);
     return interaction.reply({ content: `✅ **Anti-Spam Shield Configuration Verified:** Users transmitting \`${parsed}\` or more communications over rolling 5s blocks will receive an automated 5-minute timeout mitigation.` });
   }
 
-  // Standard Ticket Button Processing Block
   if (!interaction.isButton()) return;
 
   if (interaction.customId === 'wavey_open_ticket') return handleOpenTicket(interaction);
@@ -572,7 +603,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// Ticket Handling Management Architecture
 async function handleOpenTicket(interaction) {
   const guild = interaction.guild;
   const userId = interaction.user.id;
@@ -647,6 +677,7 @@ async function handleOpenTicket(interaction) {
     components: [buildCloseRow()],
   });
 
+  await logToChannel('Support Ticket Spun Up', `Ticket tracker created for user <@${userId}>. Allocation location: <#${ticketChannel.id}>`);
   if (interaction.editReply) await interaction.editReply({ content: `Ticket created: <#${ticketChannel.id}>` });
 }
 
@@ -675,6 +706,7 @@ async function handleCloseConfirm(interaction) {
     saveData(data);
   }
 
+  await logToChannel('Support Ticket Closed', `Ticket room channel (\`${channel.name}\`) context deleted by interaction command.`);
   await interaction.update({ content: 'Closing ticket...', components: [] });
   setTimeout(() => {
     channel.delete().catch((err) => console.error('Failed to delete ticket channel:', err));
